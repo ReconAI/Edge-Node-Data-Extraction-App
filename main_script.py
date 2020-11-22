@@ -22,6 +22,8 @@
 # DEALINGS IN THE SOFTWARE.
 ################################################################################
 
+import sys
+sys.path.append('../')
 from config import *
 import pyds
 from common.FPS import GETFPS
@@ -31,8 +33,6 @@ from gi.repository import GObject, Gst
 import gi
 import configparser
 import platform
-import sys
-sys.path.append('../')
 
 
 gi.require_version('Gst', '1.0')
