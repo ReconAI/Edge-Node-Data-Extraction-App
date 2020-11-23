@@ -24,6 +24,7 @@
 
 import sys
 sys.path.append('../')
+from modules.lp import LicencePlateDetector
 import platform
 import configparser
 import gi
@@ -33,17 +34,19 @@ from common.bus_call import bus_call
 from common.FPS import GETFPS
 import pyds
 from config import *
-
-
+import cv2
 
 gi.require_version('Gst', '1.0')
 
-fps_streams={}
+fps_streams = {}
 OSD_PROCESS_MODE = 0
-OSD_DISPLAY_TEXT= 0
+OSD_DISPLAY_TEXT = 0
+lpdetector = LicencePlateDetector()
+
 
 def osd_sink_pad_buffer_probe(pad, info, u_data):
     frame_number = 0
+    is_first_obj = True
     # Intiallizing object counter with 0.
     obj_counter = {
         PGIE_CLASS_ID_VEHICLE: 0,
@@ -84,24 +87,44 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
                 break
             ## vehicle type detection ##
             # Filter detections by PGIE1 network and don't include RoadSign class
-            if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
-                    and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
-                    and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
-                    and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
+            if (frame_number % ALPR_FRAME_RATE == 0):
+                if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
+                        and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
+                        and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
+                        and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
                     ):
-                # get secondary classifier data
-                l_classifier = obj_meta.classifier_meta_list
-                print("l_classifier", l_classifier)
-                sgie_class = -1
-                if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
-                    classifier_meta = pyds.glist_get_nvds_classifier_meta(
-                        l_classifier.data)
-                    l_label = classifier_meta.label_info_list
-                    label_info = pyds.glist_get_nvds_label_info(l_label.data)
-                    sgie_class = label_info.result_class_id
-                    print("sgie_class >>>", sgie_class)
+                    # get secondary classifier data
+                    l_classifier = obj_meta.classifier_meta_list
+                    sgie_class = -1
+                    if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
+                        classifier_meta = pyds.glist_get_nvds_classifier_meta(
+                            l_classifier.data)
+                        l_label = classifier_meta.label_info_list
+                        label_info = pyds.glist_get_nvds_label_info(l_label.data)
+                        sgie_class = label_info.result_class_id
+                        print("sgie_class >>>", sgie_class)
 
             obj_counter[obj_meta.class_id] += 1
+            if (frame_number % ALPR_FRAME_RATE == 0):
+                py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
+                    frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+                #print("obj_meta: gie_id={0}; object_id={1}; class_id={2}; classifier_class={3}".format(obj_meta.unique_component_id,obj_meta.object_id,obj_meta.class_id,sgie_class))
+                # Cv2 stuff
+                if is_first_obj:
+                    is_first_obj = False
+                    # Getting Image data using nvbufsurface
+                    # the input should be address of buffer and batch_id
+                    n_frame = pyds.get_nvds_buf_surface(
+                        hash(gst_buffer), frame_meta.batch_id)
+                    # convert python array into numy array format.
+                    frame_image = np.array(n_frame, copy=True, order='C')
+                    # covert the array into cv2 default color format
+                    frame_image = cv2.cvtColor(
+                        frame_image, cv2.COLOR_RGBA2BGRA)
+
+                # recognize license plate data
+                detected_obj_arr = recognize_license_plate(
+                    frame_image, obj_meta, obj_meta.confidence, frame_number)
             try:
                 l_obj = l_obj.next
             except StopIteration:
@@ -118,8 +141,9 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         # memory will not be claimed by the garbage collector.
         # Reading the display_text field here will return the C address of the
         # allocated string. Use pyds.get_string() to get the string content.
-        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
-            frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+        
+        # py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
+        #     frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
 
         # Now set the offsets where the string should appear
         py_nvosd_text_params.x_offset = 10
@@ -144,73 +168,80 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
             break
     return Gst.PadProbeReturn.OK
 
-def cb_newpad(decodebin, decoder_src_pad,data):
+
+def cb_newpad(decodebin, decoder_src_pad, data):
     print("In cb_newpad\n")
-    caps=decoder_src_pad.get_current_caps()
-    gststruct=caps.get_structure(0)
-    gstname=gststruct.get_name()
-    source_bin=data
-    features=caps.get_features(0)
+    caps = decoder_src_pad.get_current_caps()
+    gststruct = caps.get_structure(0)
+    gstname = gststruct.get_name()
+    source_bin = data
+    features = caps.get_features(0)
 
     # Need to check if the pad created by the decodebin is for video and not
     # audio.
-    print("gstname=",gstname)
-    if(gstname.find("video")!=-1):
+    print("gstname=", gstname)
+    if(gstname.find("video") != -1):
         # Link the decodebin pad only if decodebin has picked nvidia
         # decoder plugin nvdec_*. We do this by checking if the pad caps contain
         # NVMM memory features.
-        print("features=",features)
+        print("features=", features)
         if features.contains("memory:NVMM"):
             # Get the source bin ghost pad
-            bin_ghost_pad=source_bin.get_static_pad("src")
+            bin_ghost_pad = source_bin.get_static_pad("src")
             if not bin_ghost_pad.set_target(decoder_src_pad):
-                sys.stderr.write("Failed to link decoder src pad to source bin ghost pad\n")
+                sys.stderr.write(
+                    "Failed to link decoder src pad to source bin ghost pad\n")
         else:
-            sys.stderr.write(" Error: Decodebin did not pick nvidia decoder plugin.\n")
+            sys.stderr.write(
+                " Error: Decodebin did not pick nvidia decoder plugin.\n")
 
-def decodebin_child_added(child_proxy,Object,name,user_data):
+
+def decodebin_child_added(child_proxy, Object, name, user_data):
     print("Decodebin child added:", name, "\n")
     if(name.find("decodebin") != -1):
-        Object.connect("child-added",decodebin_child_added,user_data)   
+        Object.connect("child-added", decodebin_child_added, user_data)
     if(is_aarch64() and name.find("nvv4l2decoder") != -1):
         print("Seting bufapi_version\n")
-        Object.set_property("bufapi-version",True)
+        Object.set_property("bufapi-version", True)
 
-def create_source_bin(index,uri):
+
+def create_source_bin(index, uri):
     print("Creating source bin")
 
     # Create a source GstBin to abstract this bin's content from the rest of the
     # pipeline
-    bin_name="source-bin-%02d" %index
+    bin_name = "source-bin-%02d" % index
     print(bin_name)
-    nbin=Gst.Bin.new(bin_name)
+    nbin = Gst.Bin.new(bin_name)
     if not nbin:
         sys.stderr.write(" Unable to create source bin \n")
 
     # Source element for reading from the uri.
     # We will use decodebin and let it figure out the container format of the
     # stream and the codec and plug the appropriate demux and decode plugins.
-    uri_decode_bin=Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
+    uri_decode_bin = Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
     if not uri_decode_bin:
         sys.stderr.write(" Unable to create uri decode bin \n")
     # We set the input uri to the source element
-    uri_decode_bin.set_property("uri",uri)
+    uri_decode_bin.set_property("uri", uri)
     # Connect to the "pad-added" signal of the decodebin which generates a
     # callback once a new pad for raw data has beed created by the decodebin
-    uri_decode_bin.connect("pad-added",cb_newpad,nbin)
-    uri_decode_bin.connect("child-added",decodebin_child_added,nbin)
+    uri_decode_bin.connect("pad-added", cb_newpad, nbin)
+    uri_decode_bin.connect("child-added", decodebin_child_added, nbin)
 
     # We need to create a ghost pad for the source bin which will act as a proxy
     # for the video decoder src pad. The ghost pad will not have a target right
     # now. Once the decode bin creates the video decoder and generates the
     # cb_newpad callback, we will set the ghost pad target to the video decoder
     # src pad.
-    Gst.Bin.add(nbin,uri_decode_bin)
-    bin_pad=nbin.add_pad(Gst.GhostPad.new_no_target("src",Gst.PadDirection.SRC))
+    Gst.Bin.add(nbin, uri_decode_bin)
+    bin_pad = nbin.add_pad(
+        Gst.GhostPad.new_no_target("src", Gst.PadDirection.SRC))
     if not bin_pad:
         sys.stderr.write(" Failed to add ghost pad in source bin \n")
         return None
     return nbin
+
 
 def main(args):
     # Check input arguments
@@ -307,7 +338,7 @@ def main(args):
         print("Atleast one of the sources is live")
         streammux.set_property('live-source', 1)
 
-    print("Playing file %s " %args[1])
+    print("Playing file %s " % args[1])
     streammux.set_property('width', 1920)
     streammux.set_property('height', 1080)
     streammux.set_property('batch-size', 1)
@@ -392,4 +423,3 @@ def main(args):
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
-

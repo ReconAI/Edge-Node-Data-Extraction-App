@@ -33,7 +33,7 @@ SEND_IOT_MESSAGES = False
 PRINT_DEBUG = False
 
 # Number of frames to run License Plate detection and recognition algorithms
-ALPR_FRAME_RATE = 5
+ALPR_FRAME_RATE = 10
 # Number of frames to calculate traffic statistics
 TRAFFICSTATS_FRAME_RATE = 3600
 # Minimum age of an object to consider it a proper detection
