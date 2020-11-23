@@ -10,6 +10,7 @@ sgie_class >>> 3
 """
 
 from openalpr import Alpr
+import sys
 
 
 class LicencePlateDetector:
