@@ -123,8 +123,10 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
                         frame_image, cv2.COLOR_RGBA2BGRA)
 
                 # recognize license plate data
-                detected_obj_arr = recognize_license_plate(
+                alrp_output, lp_detection = recognize_license_plate(
                     frame_image, obj_meta, obj_meta.confidence, frame_number)
+                print("alrp out >>> ", alrp_output)
+                print("lp_detection >>>  ", lp_detection)
             try:
                 l_obj = l_obj.next
             except StopIteration:
