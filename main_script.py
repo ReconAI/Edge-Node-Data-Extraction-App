@@ -1,30 +1,7 @@
 #!/usr/bin/env python3
 
-################################################################################
-# Copyright (c) 2020, NVIDIA CORPORATION. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-################################################################################
-
 import sys
 sys.path.append('../')
-from modules.lp import LicencePlateDetector
 import platform
 import configparser
 import gi
@@ -35,13 +12,17 @@ from common.FPS import GETFPS
 import pyds
 from config import *
 import cv2
+import numpy as np
+from openalpr.src.bindings.python.detect import LpDetector
+
 
 gi.require_version('Gst', '1.0')
 
 fps_streams = {}
 OSD_PROCESS_MODE = 0
 OSD_DISPLAY_TEXT = 0
-lpdetector = LicencePlateDetector()
+
+lpdetector = LpDetector()
 
 
 def osd_sink_pad_buffer_probe(pad, info, u_data):
@@ -87,46 +68,41 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
                 break
             ## vehicle type detection ##
             # Filter detections by PGIE1 network and don't include RoadSign class
-            if (frame_number % ALPR_FRAME_RATE == 0):
-                if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
-                        and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
-                        and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
-                        and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
-                    ):
-                    # get secondary classifier data
-                    l_classifier = obj_meta.classifier_meta_list
-                    sgie_class = -1
-                    if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
-                        classifier_meta = pyds.glist_get_nvds_classifier_meta(
-                            l_classifier.data)
-                        l_label = classifier_meta.label_info_list
-                        label_info = pyds.glist_get_nvds_label_info(l_label.data)
-                        sgie_class = label_info.result_class_id
-                        print("sgie_class >>>", sgie_class)
+            if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
+                    and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
+                    and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
+                    and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
+                ):
+                # get secondary classifier data
+                l_classifier = obj_meta.classifier_meta_list
+                sgie_class = -1
+                if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
+                    classifier_meta = pyds.glist_get_nvds_classifier_meta(
+                        l_classifier.data)
+                    l_label = classifier_meta.label_info_list
+                    label_info = pyds.glist_get_nvds_label_info(l_label.data)
+                    sgie_class = label_info.result_class_id
+                    print("sgie_class >>>", sgie_class)
+                    # Cv2 stuff
+                    if is_first_obj:
+                        is_first_obj = False
+                        # Getting Image data using nvbufsurface
+                        # the input should be address of buffer and batch_id
+                        n_frame = pyds.get_nvds_buf_surface(
+                            hash(gst_buffer), frame_meta.batch_id)
+                        # convert python array into numy array format.
+                        frame_image = np.array(n_frame, copy=True, order='C')
+                        # covert the array into cv2 default color format
+                        frame_image = cv2.cvtColor(
+                            frame_image, cv2.COLOR_RGBA2BGRA)
+
+                    # recognize license plate data
+                    alrp_output= lpdetector.alpr_frame(
+                        frame_image, obj_meta, obj_meta.confidence, frame_number)
+                    print("alrp out >>> ", alrp_output)
 
             obj_counter[obj_meta.class_id] += 1
-            if (frame_number % ALPR_FRAME_RATE == 0):
-                py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
-                    frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
                 #print("obj_meta: gie_id={0}; object_id={1}; class_id={2}; classifier_class={3}".format(obj_meta.unique_component_id,obj_meta.object_id,obj_meta.class_id,sgie_class))
-                # Cv2 stuff
-                if is_first_obj:
-                    is_first_obj = False
-                    # Getting Image data using nvbufsurface
-                    # the input should be address of buffer and batch_id
-                    n_frame = pyds.get_nvds_buf_surface(
-                        hash(gst_buffer), frame_meta.batch_id)
-                    # convert python array into numy array format.
-                    frame_image = np.array(n_frame, copy=True, order='C')
-                    # covert the array into cv2 default color format
-                    frame_image = cv2.cvtColor(
-                        frame_image, cv2.COLOR_RGBA2BGRA)
-
-                # recognize license plate data
-                alrp_output, lp_detection = recognize_license_plate(
-                    frame_image, obj_meta, obj_meta.confidence, frame_number)
-                print("alrp out >>> ", alrp_output)
-                print("lp_detection >>>  ", lp_detection)
             try:
                 l_obj = l_obj.next
             except StopIteration:
@@ -144,8 +120,8 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         # Reading the display_text field here will return the C address of the
         # allocated string. Use pyds.get_string() to get the string content.
         
-        # py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
-        #     frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
+            frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
 
         # Now set the offsets where the string should appear
         py_nvosd_text_params.x_offset = 10
@@ -425,3 +401,4 @@ def main(args):
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
+
