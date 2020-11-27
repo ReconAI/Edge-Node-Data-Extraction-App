@@ -96,3 +96,5 @@ SGIE_LABELS_DICT = {
 
 # Object detector (FaceLicensePlates) classes
 PGIE2_UNIQUE_ID = 3
+# take snapshot every N frames
+DUMPINTERVAL = 30

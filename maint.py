@@ -14,7 +14,9 @@ from config import *
 import cv2
 import numpy as np
 from openalpr.src.bindings.python.detect import LpDetector
-
+import datetime
+#import sys
+#sys.path.append('../')
 
 gi.require_version('Gst', '1.0')
 
@@ -23,6 +25,7 @@ OSD_PROCESS_MODE = 0
 OSD_DISPLAY_TEXT = 0
 
 lpdetector = LpDetector()
+
 
 
 def osd_sink_pad_buffer_probe(pad, info, u_data):
@@ -36,6 +39,7 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         PGIE_CLASS_ID_ROADSIGN: 0
     }
     num_rects = 0
+    vehicles_types = []
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         print("Unable to get GstBuffer ")
@@ -45,7 +49,7 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
     # Note that pyds.gst_buffer_get_nvds_batch_meta() expects the
     # C address of gst_buffer as input, which is obtained with hash(gst_buffer)
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    l_frame = batch_meta.frame_meta_list ; print(l_frame)
+    l_frame = batch_meta.frame_meta_list
     while l_frame is not None:
         try:
             # Note that l_frame.data needs a cast to pyds.NvDsFrameMeta
@@ -67,42 +71,49 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
             except StopIteration:
                 break
             ## vehicle type detection ##
-            # Filter detections by PGIE1 network and don't include RoadSign class
-            if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
-                    and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
-                    and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
-                    and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
-                ):
-                # get secondary classifier data
-                l_classifier = obj_meta.classifier_meta_list
-                sgie_class = -1
-                if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
-                    classifier_meta = pyds.glist_get_nvds_classifier_meta(
-                        l_classifier.data)
-                    l_label = classifier_meta.label_info_list
-                    label_info = pyds.glist_get_nvds_label_info(l_label.data)
-                    sgie_class = label_info.result_class_id
-                    print("sgie_class >>>", sgie_class)
-                    # Cv2 stuff
-                    if is_first_obj:
-                        is_first_obj = False
-                        # Getting Image data using nvbufsurface
-                        # the input should be address of buffer and batch_id
-                        n_frame = pyds.get_nvds_buf_surface(
-                            hash(gst_buffer), frame_meta.batch_id)
-                        # convert python array into numy array format.
-                        frame_image = np.array(n_frame, copy=True, order='C')
-                        # covert the array into cv2 default color format
-                        frame_image = cv2.cvtColor(
-                            frame_image, cv2.COLOR_RGBA2BGRA)
+            if frame_number % DUMPINTERVAL == 0:
+                # Filter detections by PGIE1 network and don't include RoadSign class
+                if (obj_meta.unique_component_id == PGIE_UNIQUE_ID
+                            and obj_meta.class_id != PGIE_CLASS_ID_ROADSIGN  # Exclude RoadSign
+                            and obj_meta.class_id != PGIE_CLASS_ID_BICYCLE  # Exclude Bicycle
+                            and obj_meta.class_id != PGIE_CLASS_ID_PERSON  # Exclude Person
+                        ):
+                    #####################################
+                    ## vehicle type classification ##
+                    #####################################
+                    l_classifier = obj_meta.classifier_meta_list
+                    sgie_class = -1
+                    if l_classifier is not None:  # and class_id==XXX #apply classifier for a specific class
+                        classifier_meta = pyds.glist_get_nvds_classifier_meta(
+                            l_classifier.data)
+                        l_label = classifier_meta.label_info_list
+                        label_info = pyds.glist_get_nvds_label_info(l_label.data)
+                        sgie_class = label_info.result_class_id
+                        vehicles_types.append(SGIE_LABELS_DICT[sgie_class])
+                        #####################################
+                        ## licence plate recognition stage ##
+                        #####################################
 
-                    # recognize license plate data
-                    alrp_output= lpdetector.alpr_frame(
-                        frame_image, obj_meta, obj_meta.confidence, frame_number)
-                    print("alrp out >>> ", alrp_output)
+                        # # Cv2 stuff
+                        # if is_first_obj:
+                        #     is_first_obj = False
+                        #     # Getting Image data using nvbufsurface
+                        #     # the input should be address of buffer and batch_id
+                        #     n_frame = pyds.get_nvds_buf_surface(
+                        #         hash(gst_buffer), frame_meta.batch_id)
+                        #     # convert python array into numy array format.
+                        #     frame_image = np.array(n_frame, copy=True, order='C')
+                        #     # covert the array into cv2 default color format
+                        #     frame_image = cv2.cvtColor(
+                        #         frame_image, cv2.COLOR_RGBA2BGRA)
+
+                        # # recognize license plate data
+                        # alrp_output = lpdetector.alpr_frame(
+                        #     frame_image, obj_meta, obj_meta.confidence, frame_number)
+                        # print("alrp out >>> ", alrp_output)
 
             obj_counter[obj_meta.class_id] += 1
-                #print("obj_meta: gie_id={0}; object_id={1}; class_id={2}; classifier_class={3}".format(obj_meta.unique_component_id,obj_meta.object_id,obj_meta.class_id,sgie_class))
+            #print("obj_meta: gie_id={0}; object_id={1}; class_id={2}; classifier_class={3}".format(obj_meta.unique_component_id,obj_meta.object_id,obj_meta.class_id,sgie_class))
             try:
                 l_obj = l_obj.next
             except StopIteration:
@@ -119,9 +130,13 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         # memory will not be claimed by the garbage collector.
         # Reading the display_text field here will return the C address of the
         # allocated string. Use pyds.get_string() to get the string content.
-        
-        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
-            frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+
+        # py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(
+        #     frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+
+        if frame_number % DUMPINTERVAL == 0:
+            py_nvosd_text_params.display_text = "Time Stamp={} Vehicle_types={}".format(
+                datetime.datetime.now(), vehicles_types)
 
         # Now set the offsets where the string should appear
         py_nvosd_text_params.x_offset = 10
@@ -138,7 +153,10 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         # set(red, green, blue, alpha); set to Black
         py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
         # Using pyds.get_string() to get display_text as string
-        print(pyds.get_string(py_nvosd_text_params.display_text))
+        # where data is dumped
+        if frame_number % DUMPINTERVAL == 0:
+            print(pyds.get_string(py_nvosd_text_params.display_text))
+            vehicles_typesg = [] ; vehicle_types = []
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
         try:
             l_frame = l_frame.next
